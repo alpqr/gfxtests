@@ -108,6 +108,7 @@ int main(int argc, char **argv)
             }
             for (std::thread *thread : threadList)
                 thread->join();
+            qDeleteAll(threadList);
         }
         printTimeAndRestart("Loading concurrently via QImage took", &timer);
     } else {
