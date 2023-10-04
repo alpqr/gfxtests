@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <thread>
+#include <mutex>
 
 #define CGLTF_IMPLEMENTATION
 #include "../3rdparty/cgltf/cgltf.h"
@@ -81,13 +82,17 @@ int main(int argc, char **argv)
     }
 
     QVector<QImage> images;
-    static auto loadFunc = [&images](const QString &fn) {
+    std::mutex mutex;
+    static auto loadFunc = [&images, &mutex](const QString &fn) {
         QImage img;
         img.load(fn);
         if (img.isNull()) {
             qWarning() << "Failed to load" << fn;
         } else {
-            images.append(img);
+            {
+                std::lock_guard<std::mutex> guard(mutex);
+                images.append(img);
+            }
             qDebug() << fn << img;
         }
     };
