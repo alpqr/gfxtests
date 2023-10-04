@@ -24,7 +24,3 @@ The test apps requires Qt 6.7 (the 'dev' branch as of 10/2023) generally.
     Vulkan and D3D12)
 
     Backend overrides: pass -v for Vulkan, -D for D3D12.
-
-gltfgeom_rhiwidget
-
-    Work in progress cgltf-based stuff.

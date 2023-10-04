@@ -31,8 +31,14 @@ int main(int argc, char **argv)
     cmdLineParser.addPositionalArgument(QLatin1String("file"),
                                         QObject::tr("glTF file (.glb or .gltf) to parse for texture maps"),
                                         QObject::tr("file"));
+
     QCommandLineOption mipOption({ "m", "mipmaps" }, QObject::tr("Generate mipmaps."));
     cmdLineParser.addOption(mipOption);
+
+    QCommandLineOption threadOption({ "t", "thread" }, QObject::tr("Load QImages concurrently."));
+    cmdLineParser.addOption(threadOption);
+    QCommandLineOption threadCountOption({ "c", "count" }, QObject::tr("Override thread count"), QObject::tr("count"));
+    cmdLineParser.addOption(threadCountOption);
 
     QCommandLineOption glOption({ "g", "opengl" }, QLatin1String("OpenGL"));
     cmdLineParser.addOption(glOption);
@@ -108,21 +114,31 @@ int main(int argc, char **argv)
         }
     };
 
-    const int threadCount = std::thread::hardware_concurrency();
+    int threadCount = std::thread::hardware_concurrency();
+    if (cmdLineParser.isSet(threadCountOption))
+        threadCount = qMax(1, cmdLineParser.value(threadCountOption).toInt());
+
     timer.restart();
-    qDebug() << "Loading" << imagePathList.count() << "images on" << threadCount << "threads in parallel";
-    for (int t = 0; t < imagePathList.count(); t += threadCount) {
-        const int n = std::min<int>(imagePathList.count() - t, threadCount);
-        QVarLengthArray<std::thread *, 16> threadList;
-        for (int i = 0; i < n; ++i) {
-            const QString fn = imagePathList[t + i];
-            threadList.append(new std::thread(std::bind(loadFunc, fn)));
+    if (cmdLineParser.isSet(threadOption)) {
+        qDebug() << "Loading" << imagePathList.count() << "images on" << threadCount << "threads in parallel";
+        for (int t = 0; t < imagePathList.count(); t += threadCount) {
+            const int n = std::min<int>(imagePathList.count() - t, threadCount);
+            QVarLengthArray<std::thread *, 16> threadList;
+            for (int i = 0; i < n; ++i) {
+                const QString fn = imagePathList[t + i];
+                threadList.append(new std::thread(std::bind(loadFunc, fn)));
+            }
+            for (std::thread *thread : threadList)
+                thread->join();
+            qDeleteAll(threadList);
         }
-        for (std::thread *thread : threadList)
-            thread->join();
-        qDeleteAll(threadList);
+        printTimeAndRestart("Loading concurrently via QImage took", &timer);
+    } else {
+        qDebug() << "Loading" << imagePathList.count() << "images sequentially";
+        for (const QString &fn : imagePathList)
+            loadFunc(fn);
+        printTimeAndRestart("Loading sequentially via QImage took", &timer);
     }
-    printTimeAndRestart("Loading concurrently via QImage took", &timer);
 
     cgltf_free(data);
 
