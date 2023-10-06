@@ -25,7 +25,9 @@ struct Gltf
     struct SubMeshInfo {
         quint32 indexByteOffset = 0;
         quint32 indexCount = 0;
-        quint32 positionsByteOffset = 0;
+        quint32 vertexByteOffset = 0;
+        std::optional<QVector3D> minPos;
+        std::optional<QVector3D> maxPos;
     };
     struct MeshInfo {
         QVector<SubMeshInfo> subMeshInfo;
@@ -34,7 +36,8 @@ struct Gltf
     cgltf_data *data = nullptr;
     QVector<QImage> images;
     QByteArray indices;
-    QByteArray positions;
+    QByteArray vertices;
+    quint32 vertexByteStride = 0;
     QVector<MeshInfo> meshInfo;
 };
 
@@ -47,7 +50,7 @@ void Gltf::reset()
 {
     images.clear();
     indices.clear();
-    positions.clear();
+    vertices.clear();
     meshInfo.clear();
     cgltf_free(data);
     data = nullptr;
@@ -111,9 +114,17 @@ bool Gltf::load(const QString &filename)
         }
     }
     indices.resize(totalIndexCount * sizeof(quint32));
-    size_t currentIndexByteOffset = 0;
-    positions.resize(totalAccessorCount * 3 * sizeof(float));
-    size_t currentPositionsByteOffset = 0;
+    quint32 currentIndexByteOffset = 0;
+
+    QVector<QVector3D> positions;
+    QVector<QVector2D> uvs;
+    QVector<QVector3D> normals;
+    positions.reserve(totalAccessorCount);
+    uvs.reserve(totalAccessorCount);
+    normals.reserve(totalAccessorCount);
+
+    // position, UV, normal
+    vertexByteStride = (3 + 2 + 3) * sizeof(float);
 
     meshInfo.resize(data->meshes_count);
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
@@ -123,30 +134,46 @@ bool Gltf::load(const QString &filename)
         for (cgltf_size j = 0; j < mesh->primitives_count; ++j) {
             const cgltf_primitive *submesh = &mesh->primitives[j];
             SubMeshInfo subMeshInfo;
-            subMeshInfo.positionsByteOffset = currentPositionsByteOffset;
+            const qsizetype subMeshStartIndex = positions.count();
             for (cgltf_size a = 0; a < submesh->attributes_count; ++a) {
                 const cgltf_attribute *attrib = &submesh->attributes[a];
                 const cgltf_accessor *accessor = attrib->data;
                 const cgltf_buffer_view *view = accessor->buffer_view;
+                const cgltf_size stride = view->stride ? view->stride : accessor->stride;
                 cgltf_size offset = accessor->offset + view->offset;
                 for (cgltf_size acc = 0; acc < accessor->count; ++acc) {
                     const quint8 *addr = static_cast<const quint8 *>(view->buffer->data) + offset;
                     if (attrib->type == cgltf_attribute_type_position) {
                         if (accessor->type == cgltf_type_vec3) {
+                            if (accessor->has_min)
+                                subMeshInfo.minPos = QVector3D(accessor->min[0], accessor->min[1], accessor->min[2]);
+                            if (accessor->has_max)
+                                subMeshInfo.maxPos = QVector3D(accessor->max[0], accessor->max[1], accessor->max[2]);
                             const float *p = reinterpret_cast<const float *>(addr);
-                            float *dst = reinterpret_cast<float *>(positions.data() + currentPositionsByteOffset);
-                            *dst++ = p[0];
-                            *dst++ = p[1];
-                            *dst++ = p[2];
-                            currentPositionsByteOffset += 3 * sizeof(float);
+                            positions.append(QVector3D(p[0], p[1], p[2]));
+                        } else {
+                            positions.append(QVector3D());
+                        }
+                    } else if (attrib->type == cgltf_attribute_type_texcoord) {
+                        if (accessor->type == cgltf_type_vec2) {
+                            const float *p = reinterpret_cast<const float *>(addr);
+                            uvs.append(QVector2D(p[0], p[1]));
+                        } else {
+                            uvs.append(QVector2D());
+                        }
+                    } else if (attrib->type == cgltf_attribute_type_normal) {
+                        if (accessor->type == cgltf_type_vec3) {
+                            const float *p = reinterpret_cast<const float *>(addr);
+                            normals.append(QVector3D(p[0], p[1], p[2]));
+                        } else {
+                            normals.append(QVector3D());
                         }
                     }
-                    if (view->stride)
-                        offset += view->stride;
-                    else
-                        offset += accessor->stride;
+                    offset += stride;
                 }
             }
+            uvs.resize(positions.size());
+            normals.resize(positions.size());
 
             const cgltf_accessor *indexAccessor = submesh->indices;
             subMeshInfo.indexByteOffset = currentIndexByteOffset;
@@ -167,8 +194,18 @@ bool Gltf::load(const QString &filename)
             }
             currentIndexByteOffset += indexAccessor->count * sizeof(quint32);
 
+            subMeshInfo.vertexByteOffset = subMeshStartIndex * vertexByteStride;
             meshInfo[i].subMeshInfo.append(subMeshInfo);
         }
+    }
+
+    vertices.resize(positions.count() * vertexByteStride);
+    float *vp = reinterpret_cast<float *>(vertices.data());
+    for (qsizetype i = 0, count = positions.count(); i < count; ++i) {
+        memcpy(vp, &positions[i], 3 * sizeof(float));
+        memcpy(vp + 3, &uvs[i], 5 * sizeof(float));
+        memcpy(vp + 5, &normals[i], 3 * sizeof(float));
+        vp += 8;
     }
 
     return true;
@@ -455,7 +492,7 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
 {
     m_rhi = rhi();
     if (!m_pipeline) {
-        m_vbuf.reset(m_rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, m_gltf.positions.size()));
+        m_vbuf.reset(m_rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::VertexBuffer, m_gltf.vertices.size()));
         m_vbuf->create();
 
         m_ibuf.reset(m_rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::IndexBuffer, m_gltf.indices.size()));
@@ -480,10 +517,12 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
         m_pipeline->setPolygonMode(QRhiGraphicsPipeline::Line);
         QRhiVertexInputLayout inputLayout;
         inputLayout.setBindings({
-            { 3 * sizeof(float) }
+            { 8 * sizeof(float) }
         });
         inputLayout.setAttributes({
-            { 0, 0, QRhiVertexInputAttribute::Float3, 0 }
+            { 0, 0, QRhiVertexInputAttribute::Float3, 0 },
+            { 0, 1, QRhiVertexInputAttribute::Float2, 3 * sizeof(float) },
+            { 0, 2, QRhiVertexInputAttribute::Float3, 5 * sizeof(float) }
         });
         m_pipeline->setVertexInputLayout(inputLayout);
         m_pipeline->setShaderResourceBindings(m_srb.get());
@@ -491,7 +530,7 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
         m_pipeline->create();
 
         QRhiResourceUpdateBatch *resourceUpdates = m_rhi->nextResourceUpdateBatch();
-        resourceUpdates->uploadStaticBuffer(m_vbuf.get(), m_gltf.positions.constData());
+        resourceUpdates->uploadStaticBuffer(m_vbuf.get(), m_gltf.vertices.constData());
         resourceUpdates->uploadStaticBuffer(m_ibuf.get(), m_gltf.indices.constData());
         cb->resourceUpdate(resourceUpdates);
     }
@@ -522,7 +561,7 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     cb->setShaderResources();
     for (const Gltf::MeshInfo &meshInfo : std::as_const(m_gltf.meshInfo)) {
         for (const Gltf::SubMeshInfo &subMeshInfo : std::as_const(meshInfo.subMeshInfo)) {
-            const QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), subMeshInfo.positionsByteOffset);
+            const QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), subMeshInfo.vertexByteOffset);
             cb->setVertexInput(0, 1, &vbufBinding, m_ibuf.get(), subMeshInfo.indexByteOffset, QRhiCommandBuffer::IndexUInt32);
             cb->drawIndexed(subMeshInfo.indexCount);
         }
