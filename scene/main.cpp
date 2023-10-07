@@ -10,6 +10,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <rhi/qrhi.h>
+#include <thread>
+#include <mutex>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 #define CGLTF_IMPLEMENTATION
 #include "../3rdparty/cgltf/cgltf.h"
@@ -22,6 +27,7 @@ struct Model
         quint32 vertexByteOffset = 0;
         std::optional<QVector3D> minPos;
         std::optional<QVector3D> maxPos;
+        std::optional<qsizetype> materialIndex;
     };
 
     struct MeshInfo {
@@ -36,16 +42,37 @@ struct Model
 
 struct R
 {
+    struct Image {
+        QImage image;
+        QString sourceFilename;
+    };
+
+    struct TextureMap {
+        qsizetype imageIndex;
+        QRhiTexture *texture;
+    };
+
+    struct Material {
+        std::optional<TextureMap> baseColorMap;
+        QVector4D baseColorFactor;
+    };
+
     void init();
     void reset();
     quint32 indexStorage(quint32 byteSize);
     quint32 vertexStorage(quint32 byteSize);
+    void createTextures(QRhiCommandBuffer *cb);
 
     QRhi *rhi = nullptr;
     QVector<Model> models;
     quint32 vertexByteStride;
     QByteArray indices;
     QByteArray vertices;
+    QVector<Image> images;
+    QVector<Material> materials;
+
+private:
+    void createTexture(TextureMap *t, QRhiResourceUpdateBatch *u);
 } r;
 
 void R::init()
@@ -61,6 +88,12 @@ void R::reset()
 {
     indices.clear();
     vertices.clear();
+    images.clear();
+    for (Material &mat : materials) {
+        if (mat.baseColorMap.has_value())
+            delete mat.baseColorMap->texture;
+    }
+    materials.clear();
 }
 
 quint32 R::indexStorage(quint32 byteSize)
@@ -75,6 +108,28 @@ quint32 R::vertexStorage(quint32 byteSize)
     const quint32 result = vertices.size();
     vertices.resize(vertices.size() + byteSize);
     return result;
+}
+
+void R::createTexture(TextureMap *t, QRhiResourceUpdateBatch *u)
+{
+    const QImage &image(images[t->imageIndex].image);
+    QRhiTexture *texture = rhi->newTexture(QRhiTexture::RGBA8, image.size());
+    texture->create();
+    u->uploadTexture(texture, image.convertToFormat(QImage::Format_RGBA8888));
+    t->texture = texture;
+}
+
+void R::createTextures(QRhiCommandBuffer *cb)
+{
+    QElapsedTimer timer;
+    timer.start();
+    QRhiResourceUpdateBatch *u = rhi->nextResourceUpdateBatch();
+    for (Material &mat : r.materials) {
+        if (mat.baseColorMap.has_value())
+            r.createTexture(&mat.baseColorMap.value(), u);
+    }
+    cb->resourceUpdate(u);
+    qDebug() << "Texture uploads" << timer.elapsed() << "ms";
 }
 
 bool Model::load(const QString &filename)
@@ -97,6 +152,64 @@ bool Model::load(const QString &filename)
         return false;
     }
     sourceFilename = filename;
+
+    const QString prefix = QFileInfo(filename).absolutePath() + QLatin1Char('/');
+    QStringList imagePathList;
+    for (cgltf_size i = 0; i < data->images_count; ++i) {
+        const cgltf_image *image = &data->images[i];
+        const QString fn = prefix + QString::fromUtf8(image->uri);
+        imagePathList.append(fn);
+    }
+
+    std::mutex mutex;
+    static auto loadImageFunc = [this, &mutex](const QString &fn) {
+        QImage img;
+        img.load(fn);
+        if (img.isNull()) {
+            qWarning() << "Failed to load" << fn;
+            img = QImage(16, 16, QImage::Format_RGBA8888);
+            img.fill(Qt::magenta);
+        }
+        {
+            std::lock_guard<std::mutex> guard(mutex);
+            r.images.append({ img, fn });
+        }
+    };
+
+    const int threadCount = std::thread::hardware_concurrency();
+    const int firstImageGlobalIndex = r.images.count();
+    for (int t = 0; t < imagePathList.count(); t += threadCount) {
+        const int n = std::min<int>(imagePathList.count() - t, threadCount);
+        QVarLengthArray<std::thread *, 16> threadList;
+        for (int i = 0; i < n; ++i) {
+            const QString fn = imagePathList[t + i];
+            threadList.append(new std::thread(std::bind(loadImageFunc, fn)));
+        }
+        for (std::thread *thread : threadList)
+            thread->join();
+        qDeleteAll(threadList);
+    }
+
+    const int firstMaterialGlobalIndex = r.materials.count();
+    for (cgltf_size i = 0; i < data->materials_count; ++i) {
+        const cgltf_material *gmat = &data->materials[i];
+        R::Material mat;
+        if (gmat->has_pbr_metallic_roughness) {
+            const cgltf_texture_view *baseColorView = &gmat->pbr_metallic_roughness.base_color_texture;
+            if (baseColorView->texture) {
+                R::TextureMap t;
+                t.imageIndex = firstImageGlobalIndex + cgltf_image_index(data, baseColorView->texture->image);
+                mat.baseColorMap = t;
+            }
+            mat.baseColorFactor = QVector4D(gmat->pbr_metallic_roughness.base_color_factor[0],
+                                            gmat->pbr_metallic_roughness.base_color_factor[1],
+                                            gmat->pbr_metallic_roughness.base_color_factor[2],
+                                            gmat->pbr_metallic_roughness.base_color_factor[3]);
+        } else {
+            qWarning("Material %d is not PBR", int(i));
+        }
+        r.materials.append(mat);
+    }
 
     cgltf_size totalIndexCount = 0;
     cgltf_size totalVertexCount = 0;
@@ -190,6 +303,9 @@ bool Model::load(const QString &filename)
                     *dst++ = p[a];
             }
             currentIndexByteOffset += indexAccessor->count * sizeof(quint32);
+
+            if (submesh->material)
+                subMeshInfo.materialIndex = firstMaterialGlobalIndex + cgltf_material_index(data, submesh->material);
 
             meshInfo[i].subMeshInfo.append(subMeshInfo);
         }
@@ -467,14 +583,13 @@ private:
     std::unique_ptr<QRhiBuffer> m_ubuf;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline> m_pipeline;
-    float m_rotation = 0.0f;
 };
 
 ExampleRhiWidget::ExampleRhiWidget(QWidget *parent)
     : QRhiWidget(parent),
       m_wasd(&m_camera)
 {
-    m_camera.position = QVector3D(0, -100, -600);
+    m_camera.position = QVector3D(0, 0, -600);
 }
 
 void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
@@ -483,6 +598,7 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
         m_rhi = rhi();
         r.rhi = m_rhi;
         r.rhi->addCleanupCallback([](QRhi*) { r.reset(); });
+        r.createTextures(cb);
     }
 
     if (!m_pipeline) {
@@ -542,8 +658,7 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     m_camera.updateViewProjection();
 
     QMatrix4x4 modelViewProjection = m_camera.viewProjection;
-    m_rotation += 0.2f;
-    modelViewProjection.rotate(m_rotation, 0, 1, 0);
+    //modelViewProjection.rotate(m_rotation, 0, 1, 0);
     resourceUpdates->updateDynamicBuffer(m_ubuf.get(), 0, 64, modelViewProjection.constData());
 
     const QColor clearColor = QColor::fromRgbF(0.4f, 0.7f, 0.0f, 1.0f);
@@ -596,6 +711,42 @@ void ExampleRhiWidget::mouseMoveEvent(QMouseEvent *event)
         m_wasd.handleMouseMove(event->position());
 }
 
+struct InputScene
+{
+    struct Model {
+        QString key;
+        QString source;
+    };
+    QVector<Model> models;
+};
+
+static bool parseScene(InputScene *s)
+{
+    QFile f(QLatin1String("scene.json"));
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        qWarning() << "Failed to open" << f.fileName();
+        return 1;
+    }
+    QJsonParseError jsonError;
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &jsonError);
+    f.close();
+    if (doc.isNull()) {
+        qWarning() << "Failed to parse scene:" << jsonError.errorString() << "at offset" << jsonError.offset;
+        return false;
+    }
+    const QJsonObject root = doc.object();
+    const QJsonArray models = root["models"].toArray();
+    for (qsizetype i = 0; i < models.count(); ++i) {
+        const QJsonObject model = models[i].toObject();
+        InputScene::Model m;
+        m.key = model["key"].toString();
+        m.source = model["source"].toString();
+        if (!m.key.isEmpty() && !m.source.isEmpty())
+            s->models.append(m);
+    }
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
@@ -603,9 +754,6 @@ int main(int argc, char **argv)
 
     QCommandLineParser cmdLineParser;
     cmdLineParser.addHelpOption();
-    cmdLineParser.addPositionalArgument(QLatin1String("file"),
-                                        QObject::tr("glTF file (.glb or .gltf)"),
-                                        QObject::tr("file"));
     QCommandLineOption glOption({ "g", "opengl" }, QLatin1String("OpenGL"));
     cmdLineParser.addOption(glOption);
     QCommandLineOption vkOption({ "v", "vulkan" }, QLatin1String("Vulkan"));
@@ -619,22 +767,19 @@ int main(int argc, char **argv)
 
     cmdLineParser.process(app);
 
-    if (cmdLineParser.positionalArguments().isEmpty()) {
-        cmdLineParser.showHelp();
-        return 0;
-    }
-
-    const QStringList fileArgs = cmdLineParser.positionalArguments();
+    InputScene scene;
+    if (!parseScene(&scene))
+        return 1;
 
     QElapsedTimer timer;
     timer.start();
-    for (const QString &fn : fileArgs) {
+    for (const InputScene::Model &inputModel : scene.models) {
         Model model;
-        if (!model.load(fn))
+        if (!model.load(inputModel.source))
             return 1;
         r.models.append(model);
     }
-    qDebug() << "Models loaded in" << timer.elapsed() << "ms";
+    qDebug() << scene.models.count() << "models loaded in" << timer.elapsed() << "ms";
 
     ExampleRhiWidget rhiWidget;
 

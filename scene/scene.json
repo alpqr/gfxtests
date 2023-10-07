@@ -1,0 +1,12 @@
+{
+    "models": [
+        {
+            "key": "sponza",
+            "source": "../3rdparty/sponza/Sponza.gltf"
+        },
+        {
+            "key": "suzanne",
+            "source": "../3rdparty/suzanne/Suzanne.gltf"
+        }
+    ]
+}
