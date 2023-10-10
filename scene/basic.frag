@@ -40,6 +40,4 @@ void main()
     vec4 baseTexCol = srgbToLinear(texture(baseColorMap, v_uv));
     vec4 c = baseCol * baseTexCol;
     fragColor = linearToSrgb(c);
-
-    //fragColor = vec4(1.0, 0.0, 0.0, 1.0);
 }

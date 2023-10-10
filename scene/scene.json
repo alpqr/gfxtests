@@ -6,10 +6,36 @@
         },
         {
             "key": "suzanne",
-            "source": "../3rdparty/suzanne/Suzanne.gltf",
+            "source": "../3rdparty/suzanne/Suzanne.gltf"
+        }
+    ],
+    "modelInstances": [
+        {
+            "key": "sponza"
+        },
+        {
+            "key": "suzanne",
             "position": [ 0, 100, 0 ],
             "scale": [ 100, 100, 100 ],
             "rotation": [ 0, -90, 0 ]
+        },
+        {
+            "key": "suzanne",
+            "position": [ -1000, 100, 0 ],
+            "scale": [ 100, 100, 100 ],
+            "rotation": [ 0, 90, 0 ]
+        },
+        {
+            "key": "sponza",
+            "position": [ 4000, 0, 0 ]
+        },
+        {
+            "key": "sponza",
+            "position": [ 0, 0, 2500 ]
+        },
+        {
+            "key": "sponza",
+            "position": [ 4000, 0, 2500 ]
         }
     ],
     "camera": {
