@@ -19,30 +19,55 @@
 #define CGLTF_IMPLEMENTATION
 #include "../3rdparty/cgltf/cgltf.h"
 
-struct Camera
+struct Transform
 {
     QVector3D position;
     QVector3D scale = { 1, 1, 1 };
     QVector3D pivot;
-    QVector3D eulerRotation;
+    QVector3D eulerRotation; // in degrees
 
-    void updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
-                          float clipNear, float clipFar);
-    void updateWorldTransform();
-    void updateViewProjection();
     void updateRotation();
+    QQuaternion rotation;
+
+    void update();
+    QMatrix4x4 matrix;
+    QMatrix3x3 normalMatrix;
+
     QVector3D mapDirection(const QVector3D &localDirection) const;
     QVector3D forward() const { return mapDirection(QVector3D(0, 0, -1)).normalized(); }
     QVector3D up() const { return mapDirection(QVector3D(0, 1, 0)).normalized(); }
     QVector3D right() const { return mapDirection(QVector3D(1, 0, 0)).normalized(); }
-
-    QMatrix4x4 projection;
-    QMatrix4x4 worldTransform;
-    QMatrix4x4 viewProjection;
-    QQuaternion rotation;
 };
 
-static inline QVector3D transformMat33(const QMatrix3x3 &m, const QVector3D &v)
+void Transform::updateRotation()
+{
+    rotation = QQuaternion::fromEulerAngles(eulerRotation).normalized();
+}
+
+void Transform::update()
+{
+    matrix.setToIdentity();
+
+    const QVector3D offset = (-pivot * scale);
+
+    matrix(0, 0) = scale[0];
+    matrix(1, 1) = scale[1];
+    matrix(2, 2) = scale[2];
+
+    matrix(0, 3) = offset[0];
+    matrix(1, 3) = offset[1];
+    matrix(2, 3) = offset[2];
+
+    matrix = QMatrix4x4(rotation.toRotationMatrix()) * matrix;
+
+    matrix(0, 3) += position[0];
+    matrix(1, 3) += position[1];
+    matrix(2, 3) += position[2];
+
+    normalMatrix = matrix.normalMatrix();
+}
+
+static inline QVector3D transformVecByMat33(const QMatrix3x3 &m, const QVector3D &v)
 {
     const QVector3D c0 = QVector3D(m(0, 0), m(1, 0), m(2, 0));
     const QVector3D c1 = QVector3D(m(0, 1), m(1, 1), m(2, 1));
@@ -50,10 +75,21 @@ static inline QVector3D transformMat33(const QMatrix3x3 &m, const QVector3D &v)
     return c0 * v.x() + c1 * v.y() + c2 * v.z();
 }
 
-QVector3D Camera::mapDirection(const QVector3D &localDirection) const
+QVector3D Transform::mapDirection(const QVector3D &localDirection) const
 {
-    return transformMat33(worldTransform.normalMatrix(), localDirection);
+    return transformVecByMat33(normalMatrix, localDirection);
 }
+
+struct Camera
+{
+    void updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
+                          float clipNear, float clipFar);
+    void updateViewProjection();
+
+    Transform transform;
+    QMatrix4x4 projection;
+    QMatrix4x4 viewProjection;
+};
 
 void Camera::updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
                               float clipNear, float clipFar)
@@ -62,40 +98,14 @@ void Camera::updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDe
     projection.perspective(fovDegrees, aspectRatio, clipNear, clipFar);
 }
 
-void Camera::updateWorldTransform()
-{
-    worldTransform.setToIdentity();
-
-    const QVector3D offset = (-pivot * scale);
-
-    worldTransform(0, 0) = scale[0];
-    worldTransform(1, 1) = scale[1];
-    worldTransform(2, 2) = scale[2];
-
-    worldTransform(0, 3) = offset[0];
-    worldTransform(1, 3) = offset[1];
-    worldTransform(2, 3) = offset[2];
-
-    worldTransform = QMatrix4x4(rotation.toRotationMatrix()) * worldTransform;
-
-    worldTransform(0, 3) += position[0];
-    worldTransform(1, 3) += position[1];
-    worldTransform(2, 3) += position[2];
-}
-
 void Camera::updateViewProjection()
 {
     QMatrix4x4 m(Qt::Uninitialized);
-    m.setColumn(0, worldTransform.column(0).normalized());
-    m.setColumn(1, worldTransform.column(1).normalized());
-    m.setColumn(2, worldTransform.column(2).normalized());
-    m.setColumn(3, worldTransform.column(3));
+    m.setColumn(0, transform.matrix.column(0).normalized());
+    m.setColumn(1, transform.matrix.column(1).normalized());
+    m.setColumn(2, transform.matrix.column(2).normalized());
+    m.setColumn(3, transform.matrix.column(3));
     viewProjection = projection * m.inverted();
-}
-
-void Camera::updateRotation()
-{
-    rotation = QQuaternion::fromEulerAngles(eulerRotation).normalized();
 }
 
 struct WASDController
@@ -136,45 +146,45 @@ void WASDController::update()
     delta = std::min(33.3f, std::max(0.0f, delta));
 
     if (state.moveForward || state.moveBack || state.moveLeft || state.moveRight || state.moveUp || state.moveDown) {
-        camera->updateWorldTransform();
+        camera->transform.update();
         const float speed = moveSpeed * delta;
         QVector3D direction;
         if (state.moveForward || state.moveBack) {
             if (state.moveForward)
-                direction = camera->forward();
+                direction = camera->transform.forward();
             else
-                direction = -camera->forward();
+                direction = -camera->transform.forward();
             const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
-            camera->position += velocity;
+            camera->transform.position += velocity;
         }
         if (state.moveRight || state.moveLeft) {
             if (state.moveRight)
-                direction = camera->right();
+                direction = camera->transform.right();
             else
-                direction = -camera->right();
+                direction = -camera->transform.right();
             const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
-            camera->position += velocity;
+            camera->transform.position += velocity;
         }
         if (state.moveUp || state.moveDown) {
             if (state.moveUp)
-                direction = camera->up();
+                direction = camera->transform.up();
             else
-                direction = -camera->up();
+                direction = -camera->transform.up();
             const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
-            camera->position += velocity;
+            camera->transform.position += velocity;
         }
     }
 
     if (state.moveMouse) {
-        QVector3D r = camera->eulerRotation;
+        QVector3D r = camera->transform.eulerRotation;
         float rx = (state.lastMousePos.x() - state.currentMousePos.x()) * xLookSpeed * delta;
         r.setY(r.y() + rx);
 
         float ry = -1.0f * ((state.lastMousePos.y() - state.currentMousePos.y()) * -yLookSpeed * delta);
         r.setX(r.x() + ry);
 
-        camera->eulerRotation = r;
-        camera->updateRotation();
+        camera->transform.eulerRotation = r;
+        camera->transform.updateRotation();
 
         state.lastMousePos = state.currentMousePos;
     }
@@ -253,33 +263,26 @@ void WASDController::handleMouseMove(const QPointF &pos)
 
 struct Model
 {
-    struct SubMeshInfo {
+    struct SubMesh {
         quint32 indexByteOffset = 0;
         quint32 indexCount = 0;
         quint32 vertexByteOffset = 0;
         std::optional<QVector3D> minPos;
         std::optional<QVector3D> maxPos;
         std::optional<qsizetype> materialIndex;
+        QRhiShaderResourceBindings *srb = nullptr;
     };
 
-    struct MeshInfo {
-        QVector<SubMeshInfo> subMeshInfo;
+    struct Mesh {
+        QVector<SubMesh> subMeshes;
     };
 
     bool load(const QString &filename);
-    void updateWorldTransform();
-    void updateRotation();
+    void reset();
 
-    QVector<MeshInfo> meshInfo;
+    QVector<Mesh> meshes;
     QString sourceFilename;
-
-    QVector3D position;
-    QVector3D scale = { 1, 1, 1 };
-    QVector3D pivot;
-    QVector3D eulerRotation;
-
-    QQuaternion rotation;
-    QMatrix4x4 worldTransform;
+    Transform worldTransform;
 };
 
 struct R
@@ -287,6 +290,7 @@ struct R
     struct Image {
         QImage image;
         QString sourceFilename;
+        qsizetype globalGltfIndex;
     };
 
     struct TextureMap {
@@ -307,12 +311,14 @@ struct R
 
     QRhi *rhi = nullptr;
     QVector<Model> models;
+    quint32 totalSubMeshCount = 0;
     quint32 vertexByteStride;
     QByteArray indices;
     QByteArray vertices;
     QVector<Image> images;
     QVector<Material> materials;
     Camera camera;
+    QRhiTexture *dummyTexture = nullptr;
 
 private:
     void createTexture(TextureMap *t, QRhiResourceUpdateBatch *u);
@@ -327,16 +333,35 @@ void R::init()
     vertexByteStride = (3 + 2 + 3) * sizeof(float);
 }
 
+void Model::reset()
+{
+    for (Model::Mesh &mesh : meshes) {
+        for (Model::SubMesh &subMesh : mesh.subMeshes) {
+            delete subMesh.srb;
+            subMesh.srb = nullptr;
+        }
+    }
+    meshes.clear();
+}
+
 void R::reset()
 {
     indices.clear();
     vertices.clear();
     images.clear();
     for (Material &mat : materials) {
-        if (mat.baseColorMap.has_value())
+        if (mat.baseColorMap.has_value()) {
             delete mat.baseColorMap->texture;
+            mat.baseColorMap->texture = {};
+        }
     }
+    for (Model &model : models)
+        model.reset();
+    models.clear();
+    totalSubMeshCount = 0;
     materials.clear();
+    delete dummyTexture;
+    dummyTexture = nullptr;
 }
 
 quint32 R::indexStorage(quint32 byteSize)
@@ -371,13 +396,19 @@ void R::createTextures(QRhiCommandBuffer *cb)
         if (mat.baseColorMap.has_value())
             r.createTexture(&mat.baseColorMap.value(), u);
     }
+
+    dummyTexture = rhi->newTexture(QRhiTexture::RGBA8, QSize(16, 16));
+    dummyTexture->create();
+    QImage dummyContent(dummyTexture->pixelSize(), QImage::Format_RGBA8888);
+    dummyContent.fill(Qt::white);
+    u->uploadTexture(dummyTexture, dummyContent);
+
     cb->resourceUpdate(u);
     qDebug() << "Texture uploads" << timer.elapsed() << "ms";
 }
 
 bool Model::load(const QString &filename)
 {
-    meshInfo.clear();
     cgltf_data *data = nullptr;
 
     const QByteArray fn = filename.toUtf8();
@@ -405,7 +436,7 @@ bool Model::load(const QString &filename)
     }
 
     std::mutex mutex;
-    static auto loadImageFunc = [this, &mutex](const QString &fn) {
+    static auto loadImageFunc = [this, &mutex](const QString &fn, qsizetype globalGltfIndex) {
         QImage img;
         img.load(fn);
         if (img.isNull()) {
@@ -415,25 +446,26 @@ bool Model::load(const QString &filename)
         }
         {
             std::lock_guard<std::mutex> guard(mutex);
-            r.images.append({ img, fn });
+            r.images.append({ img, fn, globalGltfIndex });
         }
     };
 
     const int threadCount = std::thread::hardware_concurrency();
-    const int firstImageGlobalIndex = r.images.count();
-    for (int t = 0; t < imagePathList.count(); t += threadCount) {
+    const qsizetype firstImageGlobalIndex = r.images.count();
+    for (qsizetype t = 0; t < imagePathList.count(); t += threadCount) {
         const int n = std::min<int>(imagePathList.count() - t, threadCount);
         QVarLengthArray<std::thread *, 16> threadList;
         for (int i = 0; i < n; ++i) {
-            const QString fn = imagePathList[t + i];
-            threadList.append(new std::thread(std::bind(loadImageFunc, fn)));
+            const qsizetype gltfIndex = t + i;
+            const QString fn = imagePathList[gltfIndex];
+            threadList.append(new std::thread(std::bind(loadImageFunc, fn, firstImageGlobalIndex + gltfIndex)));
         }
         for (std::thread *thread : threadList)
             thread->join();
         qDeleteAll(threadList);
     }
 
-    const int firstMaterialGlobalIndex = r.materials.count();
+    const qsizetype firstMaterialGlobalIndex = r.materials.count();
     for (cgltf_size i = 0; i < data->materials_count; ++i) {
         const cgltf_material *gmat = &data->materials[i];
         R::Material mat;
@@ -441,7 +473,20 @@ bool Model::load(const QString &filename)
             const cgltf_texture_view *baseColorView = &gmat->pbr_metallic_roughness.base_color_texture;
             if (baseColorView->texture) {
                 R::TextureMap t;
-                t.imageIndex = firstImageGlobalIndex + cgltf_image_index(data, baseColorView->texture->image);
+                const cgltf_size globalGltfIndex = firstImageGlobalIndex + cgltf_image_index(data, baseColorView->texture->image);
+                bool mapped = false;
+                for (qsizetype localImageIndex = 0; localImageIndex < imagePathList.count(); ++localImageIndex) {
+                    const qsizetype globalImageIndex = firstImageGlobalIndex + localImageIndex;
+                    if (r.images[globalImageIndex].globalGltfIndex == globalGltfIndex) {
+                        t.imageIndex = globalImageIndex;
+                        mapped = true;
+                        break;
+                    }
+                }
+                if (!mapped) {
+                    qWarning() << "Failed to find image for gltf image index" << firstImageGlobalIndex
+                               << " + " << cgltf_image_index(data, baseColorView->texture->image);
+                }
                 mat.baseColorMap = t;
             }
             mat.baseColorFactor = QVector4D(gmat->pbr_metallic_roughness.base_color_factor[0],
@@ -473,18 +518,18 @@ bool Model::load(const QString &filename)
     uvs.reserve(totalVertexCount);
     normals.reserve(totalVertexCount);
 
-    meshInfo.resize(data->meshes_count);
+    meshes.resize(data->meshes_count);
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
         const cgltf_mesh *mesh = &data->meshes[i];
-        meshInfo[i].subMeshInfo.reserve(mesh->primitives_count);
+        meshes[i].subMeshes.reserve(mesh->primitives_count);
 
         for (cgltf_size j = 0; j < mesh->primitives_count; ++j) {
-            const cgltf_primitive *submesh = &mesh->primitives[j];
-            SubMeshInfo subMeshInfo;
+            const cgltf_primitive *primitive = &mesh->primitives[j];
+            SubMesh subMesh;
             const qsizetype subMeshVertexIndex = positions.count();
 
-            for (cgltf_size a = 0; a < submesh->attributes_count; ++a) {
-                const cgltf_attribute *attrib = &submesh->attributes[a];
+            for (cgltf_size a = 0; a < primitive->attributes_count; ++a) {
+                const cgltf_attribute *attrib = &primitive->attributes[a];
                 const cgltf_accessor *accessor = attrib->data;
                 const cgltf_buffer_view *view = accessor->buffer_view;
                 const cgltf_size stride = view->stride ? view->stride : accessor->stride;
@@ -492,9 +537,9 @@ bool Model::load(const QString &filename)
 
                 if (attrib->type == cgltf_attribute_type_position) {
                     if (accessor->has_min)
-                        subMeshInfo.minPos = QVector3D(accessor->min[0], accessor->min[1], accessor->min[2]);
+                        subMesh.minPos = QVector3D(accessor->min[0], accessor->min[1], accessor->min[2]);
                     if (accessor->has_max)
-                        subMeshInfo.maxPos = QVector3D(accessor->max[0], accessor->max[1], accessor->max[2]);
+                        subMesh.maxPos = QVector3D(accessor->max[0], accessor->max[1], accessor->max[2]);
                 }
 
                 for (cgltf_size vertexIndex = 0; vertexIndex < accessor->count; ++vertexIndex) {
@@ -526,11 +571,11 @@ bool Model::load(const QString &filename)
             uvs.resize(positions.size());
             normals.resize(positions.size());
 
-            subMeshInfo.vertexByteOffset = subMeshVertexIndex * r.vertexByteStride;
+            subMesh.vertexByteOffset = subMeshVertexIndex * r.vertexByteStride;
 
-            const cgltf_accessor *indexAccessor = submesh->indices;
-            subMeshInfo.indexByteOffset = currentIndexByteOffset;
-            subMeshInfo.indexCount = indexAccessor->count;
+            const cgltf_accessor *indexAccessor = primitive->indices;
+            subMesh.indexByteOffset = currentIndexByteOffset;
+            subMesh.indexCount = indexAccessor->count;
             const quint8 *addr = static_cast<const quint8 *>(indexAccessor->buffer_view->buffer->data) + indexAccessor->buffer_view->offset + indexAccessor->offset;
             quint32 *dst = reinterpret_cast<quint32 *>(r.indices.data() + currentIndexByteOffset);
             if (indexAccessor->stride == 1) {
@@ -547,17 +592,17 @@ bool Model::load(const QString &filename)
             }
             currentIndexByteOffset += indexAccessor->count * sizeof(quint32);
 
-            if (submesh->material)
-                subMeshInfo.materialIndex = firstMaterialGlobalIndex + cgltf_material_index(data, submesh->material);
+            if (primitive->material)
+                subMesh.materialIndex = firstMaterialGlobalIndex + cgltf_material_index(data, primitive->material);
 
-            meshInfo[i].subMeshInfo.append(subMeshInfo);
+            meshes[i].subMeshes.append(subMesh);
         }
     }
 
     const quint32 dstOffset = r.vertexStorage(positions.count() * r.vertexByteStride);
-    for (Model::MeshInfo &meshInfo : meshInfo) {
-        for (Model::SubMeshInfo &subMeshInfo : meshInfo.subMeshInfo)
-            subMeshInfo.vertexByteOffset += dstOffset;
+    for (Model::Mesh &mesh : meshes) {
+        for (Model::SubMesh &subMesh : mesh.subMeshes)
+            subMesh.vertexByteOffset += dstOffset;
     }
     float *vp = reinterpret_cast<float *>(r.vertices.data() + dstOffset);
     for (qsizetype i = 0, count = positions.count(); i < count; ++i) {
@@ -569,32 +614,6 @@ bool Model::load(const QString &filename)
 
     cgltf_free(data);
     return true;
-}
-
-void Model::updateWorldTransform()
-{
-    worldTransform.setToIdentity();
-
-    const QVector3D offset = (-pivot * scale);
-
-    worldTransform(0, 0) = scale[0];
-    worldTransform(1, 1) = scale[1];
-    worldTransform(2, 2) = scale[2];
-
-    worldTransform(0, 3) = offset[0];
-    worldTransform(1, 3) = offset[1];
-    worldTransform(2, 3) = offset[2];
-
-    worldTransform = QMatrix4x4(rotation.toRotationMatrix()) * worldTransform;
-
-    worldTransform(0, 3) += position[0];
-    worldTransform(1, 3) += position[1];
-    worldTransform(2, 3) += position[2];
-}
-
-void Model::updateRotation()
-{
-    rotation = QQuaternion::fromEulerAngles(eulerRotation).normalized();
 }
 
 static QShader getShader(const QString &name)
@@ -622,10 +641,11 @@ private:
     std::unique_ptr<QRhiBuffer> m_ibuf;
     std::unique_ptr<QRhiBuffer> m_mainUniformBuffer;
     std::unique_ptr<QRhiBuffer> m_renderableUniformBuffer;
-    std::unique_ptr<QRhiShaderResourceBindings> m_srb;
+    std::unique_ptr<QRhiSampler> m_sampler;
+    std::unique_ptr<QRhiShaderResourceBindings> m_srbLayout;
     std::unique_ptr<QRhiGraphicsPipeline> m_pipeline;
     quint32 m_renderableUbufSize;
-    quint32 m_renderableAlloc = 8;
+    quint32 m_renderableAlloc = 128;
 };
 
 ExampleRhiWidget::ExampleRhiWidget(QWidget *parent)
@@ -635,7 +655,7 @@ ExampleRhiWidget::ExampleRhiWidget(QWidget *parent)
 }
 
 static const quint32 MAIN_UBUF_SIZE = 64;
-static const quint32 RENDERABLE_UBUF_SIZE = 64;
+static const quint32 RENDERABLE_UBUF_SIZE = 64 + 16;
 
 void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
 {
@@ -660,12 +680,17 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
         m_renderableUniformBuffer.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, m_renderableUbufSize * m_renderableAlloc));
         m_renderableUniformBuffer->create();
 
-        m_srb.reset(m_rhi->newShaderResourceBindings());
-        m_srb->setBindings({
-            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_mainUniformBuffer.get()),
-            QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(1, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, m_renderableUniformBuffer.get(), RENDERABLE_UBUF_SIZE)
+        m_sampler.reset(m_rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
+                                          QRhiSampler::Repeat, QRhiSampler::Repeat, QRhiSampler::Repeat));
+        m_sampler->create();
+
+        m_srbLayout.reset(m_rhi->newShaderResourceBindings());
+        m_srbLayout->setBindings({
+            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, nullptr),
+            QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(1, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, nullptr, RENDERABLE_UBUF_SIZE),
+            QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, nullptr, nullptr)
         });
-        m_srb->create();
+        m_srbLayout->create();
 
         m_pipeline.reset(m_rhi->newGraphicsPipeline());
         m_pipeline->setShaderStages({
@@ -674,7 +699,8 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
         });
         m_pipeline->setDepthTest(true);
         m_pipeline->setDepthWrite(true);
-        m_pipeline->setPolygonMode(QRhiGraphicsPipeline::Line);
+        m_pipeline->setCullMode(QRhiGraphicsPipeline::Back);
+        //m_pipeline->setPolygonMode(QRhiGraphicsPipeline::Line);
         QRhiVertexInputLayout inputLayout;
         inputLayout.setBindings({
             { 8 * sizeof(float) }
@@ -685,7 +711,7 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
             { 0, 2, QRhiVertexInputAttribute::Float3, 5 * sizeof(float) }
         });
         m_pipeline->setVertexInputLayout(inputLayout);
-        m_pipeline->setShaderResourceBindings(m_srb.get());
+        m_pipeline->setShaderResourceBindings(m_srbLayout.get());
         m_pipeline->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
         m_pipeline->create();
 
@@ -704,22 +730,33 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     QRhiResourceUpdateBatch *resourceUpdates = m_rhi->nextResourceUpdateBatch();
 
     m_wasd.update();
-    r.camera.updateWorldTransform();
+    r.camera.transform.update();
     r.camera.updateViewProjection();
 
     resourceUpdates->updateDynamicBuffer(m_mainUniformBuffer.get(), 0, 64, r.camera.viewProjection.constData());
 
-    if (m_renderableAlloc < r.models.count()) {
-        m_renderableAlloc = r.models.count() + 16;
+    if (m_renderableAlloc < r.totalSubMeshCount) {
+        m_renderableAlloc = r.totalSubMeshCount;
         m_renderableUniformBuffer->setSize(m_renderableUbufSize * m_renderableAlloc);
         m_renderableUniformBuffer->create();
     }
 
-    for (quint32 modelIndex = 0, count = r.models.count(); modelIndex < count; ++modelIndex) {
-        Model &model(r.models[modelIndex]);
-        model.updateWorldTransform();
-        quint32 offset = modelIndex * m_renderableUbufSize;
-        resourceUpdates->updateDynamicBuffer(m_renderableUniformBuffer.get(), offset, 64, model.worldTransform.constData());
+    quint32 subMeshIndex = 0;
+    for (Model &model : r.models) {
+        model.worldTransform.update();
+        for (Model::Mesh &mesh : model.meshes) {
+            for (Model::SubMesh &subMesh : mesh.subMeshes) {
+                quint32 offset = subMeshIndex * m_renderableUbufSize;
+                resourceUpdates->updateDynamicBuffer(m_renderableUniformBuffer.get(), offset, 64, model.worldTransform.matrix.constData());
+                QVector4D baseColorFactor = { 1, 1, 1, 1 };
+                if (subMesh.materialIndex.has_value()) {
+                    const R::Material &material(r.materials[subMesh.materialIndex.value()]);
+                    baseColorFactor = material.baseColorFactor;
+                }
+                resourceUpdates->updateDynamicBuffer(m_renderableUniformBuffer.get(), offset + 64, 16, &baseColorFactor);
+                subMeshIndex += 1;
+            }
+        }
     }
 
     const QColor clearColor = QColor::fromRgbF(0.4f, 0.7f, 0.0f, 1.0f);
@@ -728,15 +765,35 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     cb->setGraphicsPipeline(m_pipeline.get());
     const QSize outputSize = colorTexture()->pixelSize();
     cb->setViewport(QRhiViewport(0, 0, outputSize.width(), outputSize.height()));
-    for (quint32 modelIndex = 0, count = r.models.count(); modelIndex < count; ++modelIndex) {
-        const Model &model(r.models.at(modelIndex));
-        const QRhiCommandBuffer::DynamicOffset dynamicOffsets[] = { { 1, modelIndex * m_renderableUbufSize } };
-        cb->setShaderResources(m_srb.get(), std::size(dynamicOffsets), dynamicOffsets);
-        for (const Model::MeshInfo &meshInfo : model.meshInfo) {
-            for (const Model::SubMeshInfo &subMeshInfo : meshInfo.subMeshInfo) {
-                const QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), subMeshInfo.vertexByteOffset);
-                cb->setVertexInput(0, 1, &vbufBinding, m_ibuf.get(), subMeshInfo.indexByteOffset, QRhiCommandBuffer::IndexUInt32);
-                cb->drawIndexed(subMeshInfo.indexCount);
+    subMeshIndex = 0;
+    for (Model &model : r.models) {
+        for (Model::Mesh &mesh : model.meshes) {
+            for (Model::SubMesh &subMesh : mesh.subMeshes) {
+                if (!subMesh.srb) {
+                    QRhiTexture *baseColorMap = nullptr;
+                    if (subMesh.materialIndex.has_value()) {
+                        const R::Material &material(r.materials[subMesh.materialIndex.value()]);
+                        if (material.baseColorMap.has_value())
+                            baseColorMap = material.baseColorMap->texture;
+                    }
+                    if (!baseColorMap)
+                        baseColorMap = r.dummyTexture;
+
+                    subMesh.srb = m_rhi->newShaderResourceBindings();
+                    subMesh.srb->setBindings({
+                        QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_mainUniformBuffer.get()),
+                        QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(1, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, m_renderableUniformBuffer.get(), RENDERABLE_UBUF_SIZE),
+                        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, baseColorMap, m_sampler.get())
+                    });
+                    subMesh.srb->create();
+                }
+
+                const QRhiCommandBuffer::DynamicOffset dynamicOffsets[] = { { 1, subMeshIndex * m_renderableUbufSize } };
+                cb->setShaderResources(subMesh.srb, std::size(dynamicOffsets), dynamicOffsets);
+                const QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), subMesh.vertexByteOffset);
+                cb->setVertexInput(0, 1, &vbufBinding, m_ibuf.get(), subMesh.indexByteOffset, QRhiCommandBuffer::IndexUInt32);
+                cb->drawIndexed(subMesh.indexCount);
+                subMeshIndex += 1;
             }
         }
     }
@@ -864,20 +921,22 @@ int main(int argc, char **argv)
     for (const InputScene::Model &inputModel : scene.models) {
         Model model;
         if (model.load(inputModel.source)) {
-            model.position = inputModel.transform.position;
-            model.eulerRotation = inputModel.transform.rotation;
-            model.scale = inputModel.transform.scale;
-            model.updateRotation();
+            model.worldTransform.position = inputModel.transform.position;
+            model.worldTransform.scale = inputModel.transform.scale;
+            model.worldTransform.eulerRotation = inputModel.transform.rotation;
+            model.worldTransform.updateRotation();
             r.models.append(model);
+            for (const Model::Mesh &mesh : std::as_const(model.meshes))
+                r.totalSubMeshCount += mesh.subMeshes.count();
         } else {
             return 1;
         }
     }
-    qDebug() << r.models.count() << "models loaded in" << timer.elapsed() << "ms";
+    qDebug() << r.models.count() << "models loaded in" << timer.elapsed() << "ms," << r.totalSubMeshCount << "submeshes in total";
 
-    r.camera.position = scene.camera.position;
-    r.camera.eulerRotation = scene.camera.rotation;
-    r.camera.updateRotation();
+    r.camera.transform.position = scene.camera.position;
+    r.camera.transform.eulerRotation = scene.camera.rotation;
+    r.camera.transform.updateRotation();
 
     ExampleRhiWidget rhiWidget;
 
