@@ -19,6 +19,238 @@
 #define CGLTF_IMPLEMENTATION
 #include "../3rdparty/cgltf/cgltf.h"
 
+struct Camera
+{
+    QVector3D position;
+    QVector3D scale = { 1, 1, 1 };
+    QVector3D pivot;
+    QVector3D eulerRotation;
+
+    void updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
+                          float clipNear, float clipFar);
+    void updateWorldTransform();
+    void updateViewProjection();
+    void updateRotation();
+    QVector3D mapDirection(const QVector3D &localDirection) const;
+    QVector3D forward() const { return mapDirection(QVector3D(0, 0, -1)).normalized(); }
+    QVector3D up() const { return mapDirection(QVector3D(0, 1, 0)).normalized(); }
+    QVector3D right() const { return mapDirection(QVector3D(1, 0, 0)).normalized(); }
+
+    QMatrix4x4 projection;
+    QMatrix4x4 worldTransform;
+    QMatrix4x4 viewProjection;
+    QQuaternion rotation;
+};
+
+static inline QVector3D transformMat33(const QMatrix3x3 &m, const QVector3D &v)
+{
+    const QVector3D c0 = QVector3D(m(0, 0), m(1, 0), m(2, 0));
+    const QVector3D c1 = QVector3D(m(0, 1), m(1, 1), m(2, 1));
+    const QVector3D c2 = QVector3D(m(0, 2), m(1, 2), m(2, 2));
+    return c0 * v.x() + c1 * v.y() + c2 * v.z();
+}
+
+QVector3D Camera::mapDirection(const QVector3D &localDirection) const
+{
+    return transformMat33(worldTransform.normalMatrix(), localDirection);
+}
+
+void Camera::updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
+                              float clipNear, float clipFar)
+{
+    projection = clipSpaceCorrMatrix;
+    projection.perspective(fovDegrees, aspectRatio, clipNear, clipFar);
+}
+
+void Camera::updateWorldTransform()
+{
+    worldTransform.setToIdentity();
+
+    const QVector3D offset = (-pivot * scale);
+
+    worldTransform(0, 0) = scale[0];
+    worldTransform(1, 1) = scale[1];
+    worldTransform(2, 2) = scale[2];
+
+    worldTransform(0, 3) = offset[0];
+    worldTransform(1, 3) = offset[1];
+    worldTransform(2, 3) = offset[2];
+
+    worldTransform = QMatrix4x4(rotation.toRotationMatrix()) * worldTransform;
+
+    worldTransform(0, 3) += position[0];
+    worldTransform(1, 3) += position[1];
+    worldTransform(2, 3) += position[2];
+}
+
+void Camera::updateViewProjection()
+{
+    QMatrix4x4 m(Qt::Uninitialized);
+    m.setColumn(0, worldTransform.column(0).normalized());
+    m.setColumn(1, worldTransform.column(1).normalized());
+    m.setColumn(2, worldTransform.column(2).normalized());
+    m.setColumn(3, worldTransform.column(3));
+    viewProjection = projection * m.inverted();
+}
+
+void Camera::updateRotation()
+{
+    rotation = QQuaternion::fromEulerAngles(eulerRotation).normalized();
+}
+
+struct WASDController
+{
+    WASDController(Camera *camera) : camera(camera) { }
+    void update();
+
+    float moveSpeed = 5.0f;
+    float xLookSpeed = 0.1f;
+    float yLookSpeed = 0.1f;
+
+    void handleKeyPress(int key);
+    void handleKeyRelease(int key);
+    void handleMousePress(const QPointF &pos);
+    void handleMouseRelease();
+    void handleMouseMove(const QPointF &pos);
+
+    Camera *camera;
+    struct {
+        bool moveForward, moveBack, moveLeft, moveRight, moveUp, moveDown;
+        bool moveMouse;
+        QPointF currentMousePos;
+        QPointF lastMousePos;
+        QElapsedTimer delta;
+        bool deltaValid;
+    } state = {};
+};
+
+void WASDController::update()
+{
+    float delta = 16.6f;
+    if (state.deltaValid) {
+        delta = state.delta.restart();
+    } else {
+        state.delta.start();
+        state.deltaValid = true;
+    }
+    delta = std::min(33.3f, std::max(0.0f, delta));
+
+    if (state.moveForward || state.moveBack || state.moveLeft || state.moveRight || state.moveUp || state.moveDown) {
+        camera->updateWorldTransform();
+        const float speed = moveSpeed * delta;
+        QVector3D direction;
+        if (state.moveForward || state.moveBack) {
+            if (state.moveForward)
+                direction = camera->forward();
+            else
+                direction = -camera->forward();
+            const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
+            camera->position += velocity;
+        }
+        if (state.moveRight || state.moveLeft) {
+            if (state.moveRight)
+                direction = camera->right();
+            else
+                direction = -camera->right();
+            const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
+            camera->position += velocity;
+        }
+        if (state.moveUp || state.moveDown) {
+            if (state.moveUp)
+                direction = camera->up();
+            else
+                direction = -camera->up();
+            const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
+            camera->position += velocity;
+        }
+    }
+
+    if (state.moveMouse) {
+        QVector3D r = camera->eulerRotation;
+        float rx = (state.lastMousePos.x() - state.currentMousePos.x()) * xLookSpeed * delta;
+        r.setY(r.y() + rx);
+
+        float ry = -1.0f * ((state.lastMousePos.y() - state.currentMousePos.y()) * -yLookSpeed * delta);
+        r.setX(r.x() + ry);
+
+        camera->eulerRotation = r;
+        camera->updateRotation();
+
+        state.lastMousePos = state.currentMousePos;
+    }
+}
+
+void WASDController::handleKeyPress(int key)
+{
+    switch (key) {
+    case Qt::Key_W:
+        state.moveForward = true;
+        state.moveBack = false;
+        break;
+    case Qt::Key_S:
+        state.moveBack = true;
+        state.moveForward = false;
+        break;
+    case Qt::Key_D:
+        state.moveRight = true;
+        state.moveLeft = false;
+        break;
+    case Qt::Key_A:
+        state.moveLeft = true;
+        state.moveRight = false;
+        break;
+    case Qt::Key_R:
+        state.moveUp = true;
+        state.moveDown = false;
+        break;
+    case Qt::Key_F:
+        state.moveDown = true;
+        state.moveUp = false;
+        break;
+    }
+}
+
+void WASDController::handleKeyRelease(int key)
+{
+    switch (key) {
+    case Qt::Key_W:
+        state.moveForward = false;
+        break;
+    case Qt::Key_S:
+        state.moveBack = false;
+        break;
+    case Qt::Key_D:
+        state.moveRight = false;
+        break;
+    case Qt::Key_A:
+        state.moveLeft = false;
+        break;
+    case Qt::Key_R:
+        state.moveUp = false;
+        break;
+    case Qt::Key_F:
+        state.moveDown = false;
+        break;
+    }
+}
+
+void WASDController::handleMousePress(const QPointF &pos)
+{
+    state.currentMousePos = pos;
+    state.lastMousePos = pos;
+    state.moveMouse = true;
+}
+
+void WASDController::handleMouseRelease()
+{
+    state.moveMouse = false;
+}
+
+void WASDController::handleMouseMove(const QPointF &pos)
+{
+    state.currentMousePos = pos;
+}
+
 struct Model
 {
     struct SubMeshInfo {
@@ -35,9 +267,19 @@ struct Model
     };
 
     bool load(const QString &filename);
+    void updateWorldTransform();
+    void updateRotation();
 
     QVector<MeshInfo> meshInfo;
     QString sourceFilename;
+
+    QVector3D position;
+    QVector3D scale = { 1, 1, 1 };
+    QVector3D pivot;
+    QVector3D eulerRotation;
+
+    QQuaternion rotation;
+    QMatrix4x4 worldTransform;
 };
 
 struct R
@@ -70,6 +312,7 @@ struct R
     QByteArray vertices;
     QVector<Image> images;
     QVector<Material> materials;
+    Camera camera;
 
 private:
     void createTexture(TextureMap *t, QRhiResourceUpdateBatch *u);
@@ -312,6 +555,10 @@ bool Model::load(const QString &filename)
     }
 
     const quint32 dstOffset = r.vertexStorage(positions.count() * r.vertexByteStride);
+    for (Model::MeshInfo &meshInfo : meshInfo) {
+        for (Model::SubMeshInfo &subMeshInfo : meshInfo.subMeshInfo)
+            subMeshInfo.vertexByteOffset += dstOffset;
+    }
     float *vp = reinterpret_cast<float *>(r.vertices.data() + dstOffset);
     for (qsizetype i = 0, count = positions.count(); i < count; ++i) {
         memcpy(vp, &positions[i], 3 * sizeof(float));
@@ -324,50 +571,7 @@ bool Model::load(const QString &filename)
     return true;
 }
 
-struct Camera
-{
-    QVector3D position;
-    QVector3D scale = { 1, 1, 1 };
-    QVector3D pivot;
-    QVector3D eulerRotation;
-
-    void updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
-                          float clipNear, float clipFar);
-    void updateWorldTransform();
-    void updateViewProjection();
-    void updateRotation();
-    QVector3D mapDirection(const QVector3D &localDirection) const;
-    QVector3D forward() const { return mapDirection(QVector3D(0, 0, -1)).normalized(); }
-    QVector3D up() const { return mapDirection(QVector3D(0, 1, 0)).normalized(); }
-    QVector3D right() const { return mapDirection(QVector3D(1, 0, 0)).normalized(); }
-
-    QMatrix4x4 projection;
-    QMatrix4x4 worldTransform;
-    QMatrix4x4 viewProjection;
-    QQuaternion rotation;
-};
-
-static inline QVector3D transformMat33(const QMatrix3x3 &m, const QVector3D &v)
-{
-    const QVector3D c0 = QVector3D(m(0, 0), m(1, 0), m(2, 0));
-    const QVector3D c1 = QVector3D(m(0, 1), m(1, 1), m(2, 1));
-    const QVector3D c2 = QVector3D(m(0, 2), m(1, 2), m(2, 2));
-    return c0 * v.x() + c1 * v.y() + c2 * v.z();
-}
-
-QVector3D Camera::mapDirection(const QVector3D &localDirection) const
-{
-    return transformMat33(worldTransform.normalMatrix(), localDirection);
-}
-
-void Camera::updateProjection(const QMatrix4x4 &clipSpaceCorrMatrix, float fovDegrees, float aspectRatio,
-                              float clipNear, float clipFar)
-{
-    projection = clipSpaceCorrMatrix;
-    projection.perspective(fovDegrees, aspectRatio, clipNear, clipFar);
-}
-
-void Camera::updateWorldTransform()
+void Model::updateWorldTransform()
 {
     worldTransform.setToIdentity();
 
@@ -388,172 +592,9 @@ void Camera::updateWorldTransform()
     worldTransform(2, 3) += position[2];
 }
 
-void Camera::updateViewProjection()
-{
-    QMatrix4x4 m(Qt::Uninitialized);
-    m.setColumn(0, worldTransform.column(0).normalized());
-    m.setColumn(1, worldTransform.column(1).normalized());
-    m.setColumn(2, worldTransform.column(2).normalized());
-    m.setColumn(3, worldTransform.column(3));
-    viewProjection = projection * m.inverted();
-}
-
-void Camera::updateRotation()
+void Model::updateRotation()
 {
     rotation = QQuaternion::fromEulerAngles(eulerRotation).normalized();
-}
-
-struct WASDController
-{
-    WASDController(Camera *camera) : camera(camera) { }
-    void update();
-
-    float moveSpeed = 5.0f;
-    float xLookSpeed = 0.1f;
-    float yLookSpeed = 0.1f;
-
-    void handleKeyPress(int key);
-    void handleKeyRelease(int key);
-    void handleMousePress(const QPointF &pos);
-    void handleMouseRelease();
-    void handleMouseMove(const QPointF &pos);
-
-    Camera *camera;
-    struct {
-        bool moveForward, moveBack, moveLeft, moveRight, moveUp, moveDown;
-        bool moveMouse;
-        QPointF currentMousePos;
-        QPointF lastMousePos;
-        QElapsedTimer delta;
-        bool deltaValid;
-    } state = {};
-};
-
-void WASDController::update()
-{
-    float delta = 16.6f;
-    if (state.deltaValid) {
-        delta = state.delta.restart();
-    } else {
-        state.delta.start();
-        state.deltaValid = true;
-    }
-    delta = std::min(33.3f, std::max(0.0f, delta));
-
-    if (state.moveForward || state.moveBack || state.moveLeft || state.moveRight || state.moveUp || state.moveDown) {
-        camera->updateWorldTransform();
-        const float speed = moveSpeed * delta;
-        QVector3D direction;
-        if (state.moveForward || state.moveBack) {
-            if (state.moveForward)
-                direction = camera->forward();
-            else
-                direction = -camera->forward();
-            const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
-            camera->position += velocity;
-        }
-        if (state.moveRight || state.moveLeft) {
-            if (state.moveRight)
-                direction = camera->right();
-            else
-                direction = -camera->right();
-            const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
-            camera->position += velocity;
-        }
-        if (state.moveUp || state.moveDown) {
-            if (state.moveUp)
-                direction = camera->up();
-            else
-                direction = -camera->up();
-            const QVector3D velocity(direction.x() * speed, direction.y() * speed, direction.z() * speed);
-            camera->position += velocity;
-        }
-    }
-
-    if (state.moveMouse) {
-        QVector3D r = camera->eulerRotation;
-        float rx = (state.lastMousePos.x() - state.currentMousePos.x()) * xLookSpeed * delta;
-        r.setY(r.y() + rx);
-
-        float ry = -1.0f * ((state.lastMousePos.y() - state.currentMousePos.y()) * -yLookSpeed * delta);
-        r.setX(r.x() + ry);
-
-        camera->eulerRotation = r;
-        camera->updateRotation();
-
-        state.lastMousePos = state.currentMousePos;
-    }
-}
-
-void WASDController::handleKeyPress(int key)
-{
-    switch (key) {
-    case Qt::Key_W:
-        state.moveForward = true;
-        state.moveBack = false;
-        break;
-    case Qt::Key_S:
-        state.moveBack = true;
-        state.moveForward = false;
-        break;
-    case Qt::Key_D:
-        state.moveRight = true;
-        state.moveLeft = false;
-        break;
-    case Qt::Key_A:
-        state.moveLeft = true;
-        state.moveRight = false;
-        break;
-    case Qt::Key_R:
-        state.moveUp = true;
-        state.moveDown = false;
-        break;
-    case Qt::Key_F:
-        state.moveDown = true;
-        state.moveUp = false;
-        break;
-    }
-}
-
-void WASDController::handleKeyRelease(int key)
-{
-    switch (key) {
-    case Qt::Key_W:
-        state.moveForward = false;
-        break;
-    case Qt::Key_S:
-        state.moveBack = false;
-        break;
-    case Qt::Key_D:
-        state.moveRight = false;
-        break;
-    case Qt::Key_A:
-        state.moveLeft = false;
-        break;
-    case Qt::Key_R:
-        state.moveUp = false;
-        break;
-    case Qt::Key_F:
-        state.moveDown = false;
-        break;
-    }
-}
-
-void WASDController::handleMousePress(const QPointF &pos)
-{
-    state.currentMousePos = pos;
-    state.lastMousePos = pos;
-    state.moveMouse = true;
-}
-
-void WASDController::handleMouseRelease()
-{
-    state.moveMouse = false;
-}
-
-void WASDController::handleMouseMove(const QPointF &pos)
-{
-    state.currentMousePos = pos;
 }
 
 static QShader getShader(const QString &name)
@@ -575,22 +616,26 @@ public:
     void mouseMoveEvent(QMouseEvent *event) override;
 
 private:
-    Camera m_camera;
     WASDController m_wasd;
     QRhi *m_rhi = nullptr;
     std::unique_ptr<QRhiBuffer> m_vbuf;
     std::unique_ptr<QRhiBuffer> m_ibuf;
-    std::unique_ptr<QRhiBuffer> m_ubuf;
+    std::unique_ptr<QRhiBuffer> m_mainUniformBuffer;
+    std::unique_ptr<QRhiBuffer> m_renderableUniformBuffer;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline> m_pipeline;
+    quint32 m_renderableUbufSize;
+    quint32 m_renderableAlloc = 8;
 };
 
 ExampleRhiWidget::ExampleRhiWidget(QWidget *parent)
     : QRhiWidget(parent),
-      m_wasd(&m_camera)
+      m_wasd(&r.camera)
 {
-    m_camera.position = QVector3D(0, 0, -600);
 }
+
+static const quint32 MAIN_UBUF_SIZE = 64;
+static const quint32 RENDERABLE_UBUF_SIZE = 64;
 
 void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
 {
@@ -608,12 +653,17 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
         m_ibuf.reset(m_rhi->newBuffer(QRhiBuffer::Immutable, QRhiBuffer::IndexBuffer, r.indices.size()));
         m_ibuf->create();
 
-        m_ubuf.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 64));
-        m_ubuf->create();
+        m_mainUniformBuffer.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, MAIN_UBUF_SIZE));
+        m_mainUniformBuffer->create();
+
+        m_renderableUbufSize = m_rhi->ubufAligned(RENDERABLE_UBUF_SIZE);
+        m_renderableUniformBuffer.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, m_renderableUbufSize * m_renderableAlloc));
+        m_renderableUniformBuffer->create();
 
         m_srb.reset(m_rhi->newShaderResourceBindings());
         m_srb->setBindings({
-            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf.get()),
+            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_mainUniformBuffer.get()),
+            QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(1, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage, m_renderableUniformBuffer.get(), RENDERABLE_UBUF_SIZE)
         });
         m_srb->create();
 
@@ -646,7 +696,7 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
     }
 
     const QSize outputSize = colorTexture()->pixelSize();
-    m_camera.updateProjection(m_rhi->clipSpaceCorrMatrix(), 45.0f, outputSize.width() / (float) outputSize.height(), 0.01f, 10000.0f);
+    r.camera.updateProjection(m_rhi->clipSpaceCorrMatrix(), 60.0f, outputSize.width() / (float) outputSize.height(), 10.0f, 10000.0f);
 }
 
 void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
@@ -654,12 +704,23 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     QRhiResourceUpdateBatch *resourceUpdates = m_rhi->nextResourceUpdateBatch();
 
     m_wasd.update();
-    m_camera.updateWorldTransform();
-    m_camera.updateViewProjection();
+    r.camera.updateWorldTransform();
+    r.camera.updateViewProjection();
 
-    QMatrix4x4 modelViewProjection = m_camera.viewProjection;
-    //modelViewProjection.rotate(m_rotation, 0, 1, 0);
-    resourceUpdates->updateDynamicBuffer(m_ubuf.get(), 0, 64, modelViewProjection.constData());
+    resourceUpdates->updateDynamicBuffer(m_mainUniformBuffer.get(), 0, 64, r.camera.viewProjection.constData());
+
+    if (m_renderableAlloc < r.models.count()) {
+        m_renderableAlloc = r.models.count() + 16;
+        m_renderableUniformBuffer->setSize(m_renderableUbufSize * m_renderableAlloc);
+        m_renderableUniformBuffer->create();
+    }
+
+    for (quint32 modelIndex = 0, count = r.models.count(); modelIndex < count; ++modelIndex) {
+        Model &model(r.models[modelIndex]);
+        model.updateWorldTransform();
+        quint32 offset = modelIndex * m_renderableUbufSize;
+        resourceUpdates->updateDynamicBuffer(m_renderableUniformBuffer.get(), offset, 64, model.worldTransform.constData());
+    }
 
     const QColor clearColor = QColor::fromRgbF(0.4f, 0.7f, 0.0f, 1.0f);
     cb->beginPass(renderTarget(), clearColor, { 1.0f, 0 }, resourceUpdates);
@@ -667,8 +728,10 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     cb->setGraphicsPipeline(m_pipeline.get());
     const QSize outputSize = colorTexture()->pixelSize();
     cb->setViewport(QRhiViewport(0, 0, outputSize.width(), outputSize.height()));
-    cb->setShaderResources();
-    for (const Model &model : std::as_const(r.models)) {
+    for (quint32 modelIndex = 0, count = r.models.count(); modelIndex < count; ++modelIndex) {
+        const Model &model(r.models.at(modelIndex));
+        const QRhiCommandBuffer::DynamicOffset dynamicOffsets[] = { { 1, modelIndex * m_renderableUbufSize } };
+        cb->setShaderResources(m_srb.get(), std::size(dynamicOffsets), dynamicOffsets);
         for (const Model::MeshInfo &meshInfo : model.meshInfo) {
             for (const Model::SubMeshInfo &subMeshInfo : meshInfo.subMeshInfo) {
                 const QRhiCommandBuffer::VertexInput vbufBinding(m_vbuf.get(), subMeshInfo.vertexByteOffset);
@@ -713,12 +776,25 @@ void ExampleRhiWidget::mouseMoveEvent(QMouseEvent *event)
 
 struct InputScene
 {
+    struct Transform {
+        QVector3D position;
+        QVector3D rotation;
+        QVector3D scale;
+    };
     struct Model {
         QString key;
         QString source;
+        Transform transform;
     };
     QVector<Model> models;
+    Transform camera;
 };
+
+static QVector3D parseVec3(const QJsonObject &obj, QLatin1StringView name, const QVector3D &defaultValue = {})
+{
+    const QJsonArray v = obj[name].toArray();
+    return v.count() >= 3 ? QVector3D(v.at(0).toDouble(), v.at(1).toDouble(), v.at(2).toDouble()) : defaultValue;
+}
 
 static bool parseScene(InputScene *s)
 {
@@ -734,16 +810,28 @@ static bool parseScene(InputScene *s)
         qWarning() << "Failed to parse scene:" << jsonError.errorString() << "at offset" << jsonError.offset;
         return false;
     }
+
     const QJsonObject root = doc.object();
+
     const QJsonArray models = root["models"].toArray();
     for (qsizetype i = 0; i < models.count(); ++i) {
         const QJsonObject model = models[i].toObject();
         InputScene::Model m;
         m.key = model["key"].toString();
         m.source = model["source"].toString();
-        if (!m.key.isEmpty() && !m.source.isEmpty())
+        if (!m.key.isEmpty() && !m.source.isEmpty()) {
+            m.transform.position = parseVec3(model, QLatin1StringView("position"));
+            m.transform.rotation = parseVec3(model, QLatin1StringView("rotation"));
+            m.transform.scale = parseVec3(model, QLatin1StringView("scale"), { 1, 1, 1 });
             s->models.append(m);
+        }
     }
+
+    const QJsonObject camera = root["camera"].toObject();
+    s->camera.position = parseVec3(camera, QLatin1StringView("position"));
+    s->camera.rotation = parseVec3(camera, QLatin1StringView("rotation"));
+    s->camera.scale = parseVec3(camera, QLatin1StringView("scale"));
+
     return true;
 }
 
@@ -775,11 +863,21 @@ int main(int argc, char **argv)
     timer.start();
     for (const InputScene::Model &inputModel : scene.models) {
         Model model;
-        if (!model.load(inputModel.source))
+        if (model.load(inputModel.source)) {
+            model.position = inputModel.transform.position;
+            model.eulerRotation = inputModel.transform.rotation;
+            model.scale = inputModel.transform.scale;
+            model.updateRotation();
+            r.models.append(model);
+        } else {
             return 1;
-        r.models.append(model);
+        }
     }
-    qDebug() << scene.models.count() << "models loaded in" << timer.elapsed() << "ms";
+    qDebug() << r.models.count() << "models loaded in" << timer.elapsed() << "ms";
+
+    r.camera.position = scene.camera.position;
+    r.camera.eulerRotation = scene.camera.rotation;
+    r.camera.updateRotation();
 
     ExampleRhiWidget rhiWidget;
 

@@ -6,7 +6,14 @@
         },
         {
             "key": "suzanne",
-            "source": "../3rdparty/suzanne/Suzanne.gltf"
+            "source": "../3rdparty/suzanne/Suzanne.gltf",
+            "position": [ 0, 100, 0 ],
+            "scale": [ 100, 100, 100 ],
+            "rotation": [ 0, -90, 0 ]
         }
-    ]
+    ],
+    "camera": {
+        "position": [ -400, 100, 0 ],
+        "rotation": [ 0, -90, 0 ]
+    }
 }
