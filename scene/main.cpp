@@ -448,7 +448,7 @@ bool Model::load(const QString &filename, const QString &key)
     }
 
     std::mutex mutex;
-    static auto loadImageFunc = [this, &mutex](const QString &fn, qsizetype globalGltfIndex) {
+    auto loadImageFunc = [&mutex](const QString &fn, qsizetype globalGltfIndex) {
         QImage img;
         img.load(fn);
         if (img.isNull()) {
@@ -672,6 +672,8 @@ private:
     QMatrix4x4 m_guiMvp;
     bool m_guiVisible = false;
     bool m_wireframe = false;
+    double m_lastGpuTimeSec = 0;
+    QElapsedTimer m_cpuFrameTimer;
 };
 
 ExampleRhiWidget::ExampleRhiWidget(QWidget *parent)
@@ -770,10 +772,13 @@ void ExampleRhiWidget::initialize(QRhiCommandBuffer *cb)
     m_guiMvp = m_rhi->clipSpaceCorrMatrix();
     const float dpr = devicePixelRatio();
     m_guiMvp.ortho(0, outputSize.width() / dpr, outputSize.height() / dpr, 0, 1, -1);
+
+    m_cpuFrameTimer.start();
 }
 
 void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
 {
+    m_lastGpuTimeSec = cb->lastCompletedGpuTime();
     m_imgui.nextFrame(size(), devicePixelRatio(), QPointF(0, 0), std::bind(&ExampleRhiWidget::gui, this));
     m_imgui.syncRenderer(m_imguiRenderer.get());
 
@@ -861,6 +866,8 @@ void ExampleRhiWidget::render(QRhiCommandBuffer *cb)
     cb->endPass();
 
     update();
+
+    m_cpuFrameTimer.restart();
 }
 
 void ExampleRhiWidget::gui()
@@ -873,6 +880,8 @@ void ExampleRhiWidget::gui()
     ImGui::Begin("Controls");
 
     ImGui::Checkbox("Wireframe", &m_wireframe);
+    ImGui::Text("CPU render-to-render: %.3f ms", m_cpuFrameTimer.nsecsElapsed() / 1000000.0);
+    ImGui::Text("GPU last completed frame: %.3f ms", m_lastGpuTimeSec * 1000.0);
 
     ImGui::End();
 }
@@ -990,6 +999,9 @@ static bool parseScene(InputScene *s)
 
 int main(int argc, char **argv)
 {
+    qputenv("QSG_INFO", "1");
+    qputenv("QSG_RHI_PROFILE", "1");
+
     QApplication app(argc, argv);
     r.init();
 
@@ -1060,6 +1072,8 @@ int main(int argc, char **argv)
 
     rhiWidget.resize(1280, 720);
     rhiWidget.show();
+
+    qDebug("Press ` or F9 to toggle GUI, WASDRF and mouse to control the camera");
 
     return app.exec();
 }
